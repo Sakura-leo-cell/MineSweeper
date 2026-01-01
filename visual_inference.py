@@ -6,78 +6,79 @@ from game_env import MinesweeperEnv
 from model import CNNDQN
 from gui_renderer import MinesweeperGUI
 
-# --- 配置 ---
 GRID_SIZE = 6
 N_MINES = 6
-MODEL_PATH = "minesweeper_cnn_pro.pth" # 确保这里是你训练好的模型文件名
-STEP_DELAY = 2 # AI每步思考的时间（秒），调大一点方便看清楚
+MODEL_PATH = "minesweeper_cnn_flags.pth" # 注意加载新模型
+STEP_DELAY = 1.0 
 
 def run_visual_game():
-    # 1. 初始化
     env = MinesweeperEnv(GRID_SIZE, N_MINES)
-    gui = MinesweeperGUI(env, cell_size=60) # cell_size控制窗口大小
+    gui = MinesweeperGUI(env, cell_size=60)
     
-    model = CNNDQN(GRID_SIZE, GRID_SIZE * GRID_SIZE)
+    n_actions = GRID_SIZE * GRID_SIZE
+    model = CNNDQN(GRID_SIZE, n_actions * 2) # 输出维度 * 2
     
-    # 2. 加载模型
     try:
         model.load_state_dict(torch.load(MODEL_PATH))
         model.eval()
-        print(f"成功加载模型: {MODEL_PATH}")
+        print(f"模型加载成功: {MODEL_PATH}")
     except FileNotFoundError:
-        print("错误: 找不到模型文件，请先运行 train.py")
+        print("请先运行 train.py 生成新的模型文件")
         gui.close()
         return
 
-    # 3. 游戏循环
     state = env.reset()
     done = False
-    print("--- 游戏开始 ---")
-
+    
     # 初始渲染
-    if not gui.render(): return
+    gui.render()
     time.sleep(1)
 
     steps = 0
     while not done:
-        # 处理 PyGame 事件防止卡死
+        state_tensor = torch.FloatTensor(state).unsqueeze(0)
         
-        # --- AI 决策 ---
-        state_tensor = torch.FloatTensor(state).unsqueeze(0) # (1, 2, H, W)
+        # --- 获取有效动作 Mask ---
+        flatten_visible = state[0].flatten()
+        flatten_flags = state[2].flatten()
+        
+        valid_click = [i for i, v in enumerate(flatten_visible) if v == -1 and flatten_flags[i] == 0]
+        valid_flag = [i + n_actions for i, v in enumerate(flatten_visible) if v == -1]
+        valid_actions = valid_click + valid_flag
+        
+        if not valid_actions: valid_actions = [0]
+
         with torch.no_grad():
             q_values = model(state_tensor)
-            # Mask
-            visible_mask = env.visible.flatten() == 1
-            q_values[0, visible_mask] = -float('inf')
-            action = torch.argmax(q_values).item()
+            full_mask = torch.ones_like(q_values) * -float('inf')
+            full_mask[0, valid_actions] = q_values[0, valid_actions]
+            action = torch.argmax(full_mask).item()
         
-        x, y = divmod(action, GRID_SIZE)
-        print(f"Step {steps}: AI 点击 ({x}, {y})")
+        # 解析动作
+        if action < n_actions:
+            x, y = divmod(action, GRID_SIZE)
+            act_type = 0 # Click
+            print(f"Step {steps}: AI 点击 ({x}, {y})")
+        else:
+            x, y = divmod(action - n_actions, GRID_SIZE)
+            act_type = 1 # Flag
+            print(f"Step {steps}: AI 插旗 ({x}, {y}) [PREDICTION: MINE]")
 
-        # --- 环境交互 ---
         state, reward, done = env.step(action)
         steps += 1
 
-        # --- 更新界面 ---
-        # 传入 (x, y) 是为了高亮显示 AI 当前点的格子
-        running = gui.render(last_action_xy=(x, y))
-        if not running: return # 用户点了关闭窗口
+        # 传入动作信息用于高亮 (类型0为绿框，1为橙框)
+        running = gui.render(last_action_info=(x, y, act_type))
+        if not running: return
 
         time.sleep(STEP_DELAY)
 
-    # 4. 游戏结束处理
-    print(">>> 游戏结束 <<<")
     if reward > 0:
-        print("AI 胜利！")
-        pygame.display.set_caption("Game Over - AI WINS!")
+        print(">>> AI 胜利！ <<<")
     else:
-        print("AI 踩雷！")
-        pygame.display.set_caption("Game Over - BOOM!")
+        print(">>> AI 踩雷 / 失败 <<<")
 
-    # 揭示所有格子给用户看
     gui.render(reveal_all=True)
-    
-    # 等待用户关闭
     gui.wait_for_quit()
 
 if __name__ == "__main__":
