@@ -7,29 +7,31 @@ from collections import deque
 from game_env import MinesweeperEnv
 from model import CNNDQN
 
-# --- 配置修改 ---
+# --- 配置参数 ---
 GRID_SIZE = 6
 N_MINES = 6
-EPISODES = 5000       # 增加训练轮数
-BATCH_SIZE = 128      # 增加 Batch Size 稳定梯度
-LR = 0.0005           # 降低学习率，防止震荡
-GAMMA = 0.99          # 看得更长远
+EPISODES = 5000       
+BATCH_SIZE = 128      
+LR = 0.0005           
+GAMMA = 0.99          
 EPSILON_START = 1.0
 EPSILON_MIN = 0.05
-EPSILON_DECAY = 0.999 # 衰减得非常慢，保证前2000轮都有大量探索
+# 修改：稍微加快衰减 (0.999 -> 0.995)，因为现在的探索是"有效探索"，不需要浪费太多时间
+EPSILON_DECAY = 0.995 
 
 def train():
     env = MinesweeperEnv(GRID_SIZE, N_MINES)
-    # 记得这里的 input shape 在 model 内部已经写死为 2 了，不需要传参
+    # 输入通道固定为2 (Visible层 + Value层)
     model = CNNDQN(GRID_SIZE, GRID_SIZE * GRID_SIZE)
     optimizer = optim.Adam(model.parameters(), lr=LR)
     criterion = nn.MSELoss()
-    replay_buffer = deque(maxlen=10000) # 增大记忆库
+    replay_buffer = deque(maxlen=10000) 
     
     epsilon = EPSILON_START
     win_count = 0
     
     print(f"--- 开始训练 Pro 版扫雷 AI ({GRID_SIZE}x{GRID_SIZE}) ---")
+    print(">>> 优化策略：智能探索 (只随机点击未知区域)")
 
     for episode in range(EPISODES):
         state = env.reset()
@@ -39,19 +41,32 @@ def train():
         while not done:
             state_tensor = torch.FloatTensor(state).unsqueeze(0) # (1, 2, H, W)
             
+            # --- 关键修改：获取所有合法的动作（即未翻开的格子）---
+            # state[0] 是 visible 层: -1 代表未知, 1 代表已知
+            flatten_visible = state[0].flatten()
+            valid_actions = [i for i, val in enumerate(flatten_visible) if val == -1]
+            
+            # 极少数情况（如赢了但done还没传出来）可能没有合法动作，兜底防报错
+            if not valid_actions: 
+                valid_actions = [0]
+
+            # --- 动作选择策略 ---
             if random.random() < epsilon:
-                action = random.randint(0, GRID_SIZE*GRID_SIZE - 1)
+                # [核心修改] 随机模式下，只在"合法动作"里选
+                # 这样模型永远不会浪费步数去点已经点开的格子
+                action = random.choice(valid_actions)
             else:
                 with torch.no_grad():
                     q_values = model(state_tensor)
-                    # 关键Mask：强制不点已经点过的地方
+                    # 预测模式下，Mask 掉已知格子 (设为负无穷)
+                    # 这里的逻辑和你原来的一样，是非常正确的
                     visible_mask = env.visible.flatten() == 1
                     q_values[0, visible_mask] = -float('inf')
                     action = torch.argmax(q_values).item()
 
+            # 执行动作
             next_state, reward, done = env.step(action)
             
-            # 重要：如果赢了，打印一下
             if reward == 50.0:
                 win_count += 1
             
@@ -59,6 +74,7 @@ def train():
             state = next_state
             total_reward += reward
             
+            # --- 训练步骤 ---
             if len(replay_buffer) > BATCH_SIZE:
                 batch = random.sample(replay_buffer, BATCH_SIZE)
                 b_state, b_action, b_reward, b_next_state, b_done = zip(*batch)
@@ -69,18 +85,20 @@ def train():
                 b_reward = torch.FloatTensor(b_reward).unsqueeze(1)
                 b_done = torch.FloatTensor(b_done).unsqueeze(1)
                 
+                # 计算当前 Q 值
                 q_current = model(b_state).gather(1, b_action)
                 
+                # 计算目标 Q 值 (Double DQN 简化版)
                 with torch.no_grad():
-                    # Double DQN 思想 (简化版)：直接取 max
                     q_next = model(b_next_state).max(1)[0].unsqueeze(1)
                     q_target = b_reward + (GAMMA * q_next * (1 - b_done))
                 
                 loss = criterion(q_current, q_target)
                 optimizer.zero_grad()
                 loss.backward()
-                optimizer.step()
+                optimizer.step()    
 
+        # Epsilon 衰减
         if epsilon > EPSILON_MIN:
             epsilon *= EPSILON_DECAY
             

@@ -37,32 +37,32 @@ class MinesweeperEnv:
     def step(self, action):
         x, y = divmod(action, self.grid_size)
         
-        # 1. 重复点击惩罚 (稍微降低一点惩罚，别让它太害怕)
+        # 1. 重复点击惩罚 (保持 -1 或更低，防止死循环)
         if self.visible[x, y] == 1:
-            return self._get_state(), -1.0, False # 之前是 -5
+            return self._get_state(), -1.0, False 
 
-        # 2. 踩雷
+        # 2. 踩雷 -> 修改这里！
         if self.grid[x, y] == -1:
             self.visible[x, y] = 1
-            return self._get_state(), -5.0, True # 之前是 -10，稍微宽容点
+            # [修改点] 将 -5.0 改为 -20.0 或更低
+            # 必须让它明白：踩一次雷，之前赚的几十步奖励全都要吐出来！
+            return self._get_state(), -20.0, True 
 
-        # 3. 点击安全格
-        # 计算这次操作前后的可见数量，以此计算"开疆拓土"的奖励
+        # 3. 点击安全格 -> 保持原来的逻辑，或者稍微降低一点奖励
         visible_before = np.sum(self.visible)
         self.visible[x, y] = 1
         if self.grid[x, y] == 0:
             self._flood_fill(x, y)
         visible_after = np.sum(self.visible)
         
-        # 奖励机制的核心修改：
-        # 基础奖励 0.3 + 每多翻开一个格子额外奖励 0.5
-        # 这会极大地鼓励 AI 去找 0 (因为点 0 会连锁翻开很多)
+        # [建议] 稍微降低基础奖励，让它不要为了刷分而冒险
         newly_revealed = visible_after - visible_before
-        reward = 0.3 + (newly_revealed * 0.5)
+        # 比如改为 0.1 基础分，多翻开一个给 0.5
+        reward = 0.1 + (newly_revealed * 0.5)
 
-        # 4. 胜利
+        # 4. 胜利 -> 保持高额奖励
         if np.sum(self.visible) == (self.grid_size**2 - self.n_mines):
-            return self._get_state(), 50.0, True # 巨额奖励
+            return self._get_state(), 50.0, True
 
         return self._get_state(), reward, False
 
